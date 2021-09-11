@@ -14,7 +14,7 @@ import (
 )
 
 func main()  {
-  server, err := szBinary.NewBinaryServer(szBinary.PlatformID5, 9001, "sender", "target", []uint32{1}, onBusinessRequest, onReportSynchronization)
+  server, err := szBinary.NewBinaryServer(szBinary.PlatformID5, 9001, "sender", "target", []uint32{1}, onBusinessRequest)
   if err != nil {
     log.Fatalln(err)
   }
@@ -38,10 +38,5 @@ func main()  {
 func onBusinessRequest(msgtype uint32, data []byte)  {
   // 业务请求回调
   log.Println("msgtype=", msgtype, "data=", data)
-}
-
-func onReportSynchronization(syncParams szBinary.ReportSynchronization)  {
-  // 回报同步请求回调
-  log.Printf("receive report sync request: %+v", syncParams)
 }
 ```

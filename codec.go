@@ -11,25 +11,16 @@ const (
 	checksumLen = 4
 )
 
-type SzBinaryCodec struct {
+type szBinaryCodec struct {
 }
 
-func NewSzBinaryCodec() *SzBinaryCodec {
-	return &SzBinaryCodec{}
+func newSzBinaryCodec() *szBinaryCodec {
+	return &szBinaryCodec{}
 }
 
 // Encode ...
-func (cc *SzBinaryCodec) Encode(c gnet.Conn, buf []byte) (out []byte, err error) {
-	out = make([]byte, 4)
-	checkSum := uint32(0)
-	for _, b := range buf {
-		checkSum = checkSum + uint32(b)
-	}
-	checkSum = checkSum % 256
-	binary.BigEndian.PutUint32(out, checkSum)
-	out = append(buf, out...)
-	logger.Infof("outgoing=%v", out)
-	return
+func (cc *szBinaryCodec) Encode(c gnet.Conn, buf []byte) (out []byte, err error) {
+	return buf, nil
 }
 
 type innerBuffer []byte
@@ -50,7 +41,7 @@ func (in *innerBuffer) readN(n int) (buf []byte, err error) {
 }
 
 // Decode ...
-func (cc *SzBinaryCodec) Decode(c gnet.Conn) ([]byte, error) {
+func (cc *szBinaryCodec) Decode(c gnet.Conn) ([]byte, error) {
 	var in innerBuffer
 	in = c.Read()
 	headerBuff, err := in.readN(headerLen)
@@ -79,11 +70,10 @@ func (cc *SzBinaryCodec) Decode(c gnet.Conn) ([]byte, error) {
 	copy(fullMessage[headerLen + bodyLen:], bodyBuff)
 	copy(fullMessage[headerLen + bodyLen + bodyLength:], checksumBuff)
 	c.ShiftN(len(fullMessage))
-	logger.Infof("incoming=%v", fullMessage)
 	return fullMessage, nil
 }
 
-func (cc *SzBinaryCodec) getBody(in *innerBuffer) ([]byte, int, error) {
+func (cc *szBinaryCodec) getBody(in *innerBuffer) ([]byte, int, error) {
 	lenBuf, err := in.readN(bodyLen)
 	if err != nil {
 			return nil, 0, errUnexpectedEOF
