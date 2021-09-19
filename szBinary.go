@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -46,7 +47,7 @@ type SzBinaryServer struct {
 	receiveTime *atomic.Time
 	sendTime *atomic.Time
 	client gnet.Conn
-	onBusinessRequestCallback func(msgtype uint32, data []byte)
+	onBusinessRequestCallback func(msgtype uint32, body []byte)
 	running *atomic.Bool
 	runningChan chan bool
 	port int
@@ -103,7 +104,7 @@ func (es *SzBinaryServer) OnOpened(c gnet.Conn) (out []byte, action gnet.Action)
 	es.logfile.Infof("%s request to connect", c.RemoteAddr().String())
 	if es.connected.Load() {
 		// already connected, only one client allowed to be connected
-		es.asyncSendToTarget(c, msgtypeLogout, 0, logOut("another client already connected"))
+		es.asyncSendToTarget(c, msgtypeLogout, logOut("another client already connected"))
 		es.logfile.Errorf("another client already connected to this gateway: %s", es.client.RemoteAddr())
 		c.Close()
 		return
@@ -123,7 +124,7 @@ func (es *SzBinaryServer) SendPlatformState(status uint16) (err error) {
 	b := make([]byte, 2 + 2)
 	binary.BigEndian.PutUint16(b, es.platformID)
 	binary.BigEndian.PutUint16(b[2:4], status)
-	return es.AsyncSend(msgtypePlatformState, 0, b)
+	return es.AsyncSend(msgtypePlatformState, b)
 }
 
 func (es *SzBinaryServer) SendReportFinish(partitionNo uint32, reportIndex uint64) (err error) {
@@ -150,7 +151,7 @@ func (es *SzBinaryServer) SendReportFinish(partitionNo uint32, reportIndex uint6
 		binary.BigEndian.PutUint32(b, uint32(partitionNo))
 		binary.BigEndian.PutUint64(b[4:12], reportIndex)
 		binary.BigEndian.PutUint16(b[12:14], es.platformID)
-		if err := es.AsyncSend(msgtypeReportFinished, 0, b); err != nil {
+		if err := es.AsyncSend(msgtypeReportFinished, b); err != nil {
 			return err
 		}
 	}
@@ -166,7 +167,7 @@ func (es *SzBinaryServer) SendPlatformInfo() (err error) {
 	for i:=0; i<len(es.partitionNos); i++ {
 		binary.BigEndian.PutUint32(b[6+i*4:6+i*4+4], es.partitionNos[i])
 	}
-	return es.AsyncSend(msgtypePlatformInfo, 0, b)
+	return es.AsyncSend(msgtypePlatformInfo, b)
 }
 
 func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
@@ -182,14 +183,14 @@ func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action g
 				senderCompID := Bytes2str(bodyBuff[:20])
 				targetCompID := Bytes2str(bodyBuff[20:40])
 				if es.senderCompID != strings.TrimSpace(targetCompID) || es.targetCompID != strings.TrimSpace(senderCompID) {
-					es.AsyncSend(msgtypeLogout, 0, logOut("senderCompID and targetCompID not match"))
+					es.AsyncSend(msgtypeLogout, logOut("senderCompID and targetCompID not match"))
 					c.Close()
 					return
 				}
 				HeartBtInt := binary.BigEndian.Uint32(bodyBuff[40:44])
 				Password := Bytes2str(bodyBuff[44:60])
 				DefaultApplVerID := Bytes2str(bodyBuff[60:92])
-				es.AsyncSend(msgtypeLogon, 0, logOn(es.senderCompID, es.targetCompID, HeartBtInt, Password, DefaultApplVerID))
+				es.AsyncSend(msgtypeLogon, logOn(es.senderCompID, es.targetCompID, HeartBtInt, Password, DefaultApplVerID))
 				es.heartBeatInt = HeartBtInt
 				es.logon.Store(true)
 				// send platform status after logon successfully
@@ -199,7 +200,7 @@ func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action g
 				return
 			}
 			// duplicate logon
-			es.asyncSendToTarget(c, msgtypeLogout, 0, logOut("duplicate logon"))
+			es.asyncSendToTarget(c, msgtypeLogout, logOut("duplicate logon"))
 			c.Close()
 			return
 		case msgtypeLogout:
@@ -207,7 +208,7 @@ func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action g
 				c.Close()
 				return
 			}
-			es.AsyncSend(msgtypeLogout, 0, logOut(""))
+			es.AsyncSend(msgtypeLogout, logOut(""))
 			c.Close()
 			return
 		case msgtypeHeartbeat:
@@ -255,7 +256,7 @@ func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action g
 
 func (es *SzBinaryServer) checkLogon(c gnet.Conn) bool {
 	if !es.logon.Load() {
-		es.asyncSendToTarget(c, msgtypeLogout, 0, logOut("not logon yet, please logon first"))
+		es.asyncSendToTarget(c, msgtypeLogout, logOut("not logon yet, please logon first"))
 		return false
 	}
 	return c == es.client
@@ -269,7 +270,7 @@ func (es *SzBinaryServer) Tick() (delay time.Duration, action gnet.Action) {
 	if es.Connected() {
 		if time.Now().Sub(es.sendTime.Load()).Seconds() >= float64(es.heartBeatInt) {
 			// need to send a heartbeat message to client
-			es.AsyncSend(msgtypeHeartbeat, 0, []byte{})
+			es.AsyncSend(msgtypeHeartbeat, []byte{})
 		}
 	}
 	if es.Connected() {
@@ -291,7 +292,7 @@ func (es *SzBinaryServer) sendBuff(buff []byte) (err error) {
 	return nil
 }
 
-func (es *SzBinaryServer) sendToTarget(conn gnet.Conn, msgType uint32, partitionNo uint32, body []byte) (err error) {
+func (es *SzBinaryServer) sendToTarget(conn gnet.Conn, msgType uint32, body []byte) (err error) {
 	bodyLen := len(body)
 	if msgType < 10000 {
 		// 业务相关的消息类型目前都是大于100000的
@@ -316,6 +317,8 @@ func (es *SzBinaryServer) sendToTarget(conn gnet.Conn, msgType uint32, partition
 			return err
 		}
 	} else {
+		// 随机用一个分区发出去
+		partitionNo := es.partitionNos[rand.Intn(len(es.partitionNos))]
 		// 业务相关消息类型，与分区有关，与基础功能号相比，多了分区号和回报序号
 		buf := make([]byte, 4 + 4 + 4 + 8 + bodyLen + 4)
 		//消息头
@@ -347,12 +350,12 @@ func (es *SzBinaryServer) sendToTarget(conn gnet.Conn, msgType uint32, partition
 	return nil
 }
 
-func (es *SzBinaryServer) AsyncSend(msgType uint32, partitionNo uint32, body []byte) (err error) {
-	return es.sendToTarget(es.client, msgType, partitionNo, body)
+func (es *SzBinaryServer) AsyncSend(msgType uint32, body []byte) (err error) {
+	return es.sendToTarget(es.client, msgType, body)
 }
 
-func (es *SzBinaryServer) asyncSendToTarget(c gnet.Conn, msgType uint32, partitionNo uint32, body []byte) (err error) {
-	return es.sendToTarget(c, msgType, partitionNo, body)
+func (es *SzBinaryServer) asyncSendToTarget(c gnet.Conn, msgType uint32, body []byte) (err error) {
+	return es.sendToTarget(c, msgType, body)
 }
 
 func (es *SzBinaryServer) incrSequence(platformID uint16, partitionNo uint32) uint64 {
@@ -373,6 +376,9 @@ func (es *SzBinaryServer) incrSequence(platformID uint16, partitionNo uint32) ui
 func (es *SzBinaryServer) Run() (err error) {
 	if es.running.Load() {
 		return errIsRunning
+	}
+	if len(es.partitionNos) == 0 {
+		return errEmptyPartitions
 	}
 	es.logfile, es.logFlush, err = logging.CreateLoggerAsLocalFile(fmt.Sprintf("./logs/%s-%s.log", es.senderCompID, es.targetCompID), zapcore.DebugLevel)
 	if err != nil {
@@ -403,6 +409,9 @@ func (es *SzBinaryServer) Run() (err error) {
 	}()
 	<- es.runningChan
 	if err == nil {
+		if es.pool == nil {
+			es.pool = goroutine.Default()
+		}
 		es.running.Store(true)
 	}
 	return err
@@ -458,7 +467,7 @@ func (es *SzBinaryServer) BusinessReject(applID, pbuID, securityID, SecurityIDSo
 	copy(b[41:51], Str2bytes(rejectRefID))
 	binary.BigEndian.PutUint16(b[51:53], rejectReason)
 	copy(b[53:103], Str2bytes(rejectText))
-	return es.AsyncSend(msgtypeBusinessReject, 0, b)
+	return es.AsyncSend(msgtypeBusinessReject, b)
 }
 
 func (es *SzBinaryServer) Stop() (err error) {
@@ -468,15 +477,12 @@ func (es *SzBinaryServer) Stop() (err error) {
 	err = gnet.Stop(context.Background(), fmt.Sprintf("tcp://:%d", es.port))
 	if err == nil {
 		es.running.Store(false)
+		if es.pool != nil {
+			es.pool.Release()
+			es.pool = nil
+		}
 	}
 	return
-}
-
-func (es *SzBinaryServer) Release()  {
-	if es.running.Load() {
-		es.Stop()
-	}
-	es.pool.Release()
 }
 
 func (es *SzBinaryServer) loadSequence() error {
@@ -542,7 +548,7 @@ func (es *SzBinaryServer) getMessage() error {
 	return nil
 }
 
-func NewBinaryServer(platformID uint16, port int, senderCompID, targetCompID string, partitionNos []uint32, onBusinessRequest func(msgtype uint32, data []byte)) *SzBinaryServer {
+func NewBinaryServer(platformID uint16, port int, senderCompID, targetCompID string, partitionNos []uint32, onBusinessRequest func(msgtype uint32, body []byte)) *SzBinaryServer {
 	return &SzBinaryServer{
 		connected:    atomic.NewBool(false),
 		logon:        atomic.NewBool(false),

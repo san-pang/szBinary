@@ -15,4 +15,6 @@ var (
 	errIsRunning = errors.New("task is already running")
 
 	errIsNotRunning = errors.New("task is not running")
+
+	errEmptyPartitions = errors.New("partitions is empty")
 )
