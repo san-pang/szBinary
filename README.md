@@ -23,7 +23,7 @@ func main()  {
     log.Fatalln(err)
   }
   if server.Connected() {
-    // 发送buff数据给客户端
+    // 发送buff数据给客户端, buff打包目前需由用户自己实现
     server.AsyncSend(100414, []byte{})
     // 发送平台信息给客户端（实际上客户端登录后会自动发送该消息，无需用户自己发送，如有必要可以手工触发该消息发送）
     server.SendPlatformInfo()
