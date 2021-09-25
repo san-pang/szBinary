@@ -52,6 +52,7 @@ type SzBinaryServer struct {
 	partitionNos []uint32
 	// log文件
 	logfile logging.Logger
+	logLevel zapcore.Level
 	// log flush函数
 	logFlush func() error
 	// sequence内存,key的格式为"平台编号_分区编号", value为该分区的最大回报编号
@@ -66,8 +67,7 @@ type SzBinaryServer struct {
 	indexFile *os.File
 	indexFileName string
 	// lock
-	sequenceLock sync.Mutex
-	msgLock sync.Mutex
+	lock *sync.Mutex
 }
 
 func (es *SzBinaryServer) OnInitComplete(srv gnet.Server) (action gnet.Action) {
@@ -172,7 +172,7 @@ func (es *SzBinaryServer) SendPlatformInfo() (err error) {
 
 func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
 	es.pool.Submit(func() {
-		es.logfile.Infof("incoming: from=%s, data=%v", c.RemoteAddr(), frame)
+		es.logfile.Debugf("incoming: from=%s, data=%v", c.RemoteAddr(), frame)
 		es.receiveTime.Store(time.Now())
 		msgType := binary.BigEndian.Uint32(frame[:4])
 		bodyLen := binary.BigEndian.Uint32(frame[4:8])
@@ -223,16 +223,13 @@ func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action g
 				return
 			}
 			NoPartitions := binary.BigEndian.Uint32(bodyBuff[:4])
-			var lock sync.Mutex
-			lock.Lock()
-			defer lock.Unlock()
 			for i:=uint32(0);i<NoPartitions;i++{
 				PartitionNo := binary.BigEndian.Uint32(bodyBuff[4 + 12*i:8 + 12*i])
 				ReportIndex := binary.BigEndian.Uint64(bodyBuff[8 + 12*i:16 + 12*i])
 				if PartitionNo == 4 {
 					ReportIndex = 11
 				}
-				es.logfile.Infof("回报同步请求，分区编号=%d, 起始序号=%d", PartitionNo, ReportIndex)
+				es.logfile.Debugf("回报同步请求，分区编号=%d, 起始序号=%d", PartitionNo, ReportIndex)
 				for i:=0; i<1000; i++ {
 					//每次同步一千条
 					if msgdef, found := es.indexCache[fmt.Sprintf("%d_%d_%d", es.platformID, PartitionNo, ReportIndex+uint64(i))]; found {
@@ -287,7 +284,7 @@ func (es *SzBinaryServer) Tick() (delay time.Duration, action gnet.Action) {
 }
 
 func (es *SzBinaryServer) sendBuff(buff []byte) (err error) {
-	es.logfile.Infof("outgoing: target=%s, data=%v", es.client.RemoteAddr(), buff)
+	es.logfile.Debugf("outgoing: target=%s, data=%v", es.client.RemoteAddr(), buff)
 	if err = es.client.AsyncWrite(buff); err != nil {
 		es.logfile.Errorf("response send failed: %s", err.Error())
 		return err
@@ -314,7 +311,7 @@ func (es *SzBinaryServer) sendToTarget(conn gnet.Conn, msgType uint32, body []by
 		}
 		checkSum = checkSum % 256
 		binary.BigEndian.PutUint32(buf[8+bodyLen:], checkSum)
-		es.logfile.Infof("outgoing: target=%s, data=%v", conn.RemoteAddr(), buf)
+		es.logfile.Debugf("outgoing: target=%s, data=%v", conn.RemoteAddr(), buf)
 		if err = conn.AsyncWrite(buf); err != nil {
 			es.logfile.Errorf("response send failed: %s", err.Error())
 			return err
@@ -340,7 +337,7 @@ func (es *SzBinaryServer) sendToTarget(conn gnet.Conn, msgType uint32, body []by
 		}
 		checkSum = checkSum % 256
 		binary.BigEndian.PutUint32(buf[20+bodyLen:], checkSum)
-		es.logfile.Infof("outgoing: target=%s, data=%v", conn.RemoteAddr(), buf)
+		es.logfile.Debugf("outgoing: target=%s, data=%v", conn.RemoteAddr(), buf)
 		if err = conn.AsyncWrite(buf); err != nil {
 			es.logfile.Errorf("response send failed: %s", err.Error())
 			//发送失败也需要继续保存到本地文件，因此这里不能return
@@ -365,8 +362,8 @@ func (es *SzBinaryServer) incrSequence(platformID uint16, partitionNo uint32) ui
 		return seq.AddUint64(value, 1)
 	}
 	// key不存在，则返回1
-	es.sequenceLock.Lock()
-	defer es.sequenceLock.Unlock()
+	es.lock.Lock()
+	defer es.lock.Unlock()
 	var initValue uint64 = 1
 	es.sequence[key] = &initValue
 	return initValue
@@ -379,7 +376,7 @@ func (es *SzBinaryServer) Run() (err error) {
 	if len(es.partitionNos) == 0 {
 		return errEmptyPartitions
 	}
-	es.logfile, es.logFlush, err = logging.CreateLoggerAsLocalFile(fmt.Sprintf("./logs/%s-%s.log", es.senderCompID, es.targetCompID), zapcore.DebugLevel)
+	es.logfile, es.logFlush, err = logging.CreateLoggerAsLocalFile(fmt.Sprintf("./logs/%s-%s.log", es.senderCompID, es.targetCompID), es.logLevel)
 	if err != nil {
 		return
 	}
@@ -417,8 +414,8 @@ func (es *SzBinaryServer) Run() (err error) {
 }
 
 func (es *SzBinaryServer) saveMessage(partitionNo uint32, reportIndex uint64, data []byte) (err error) {
-	es.msgLock.Lock()
-	defer es.msgLock.Unlock()
+	es.lock.Lock()
+	defer es.lock.Unlock()
 	//保存data
 	offset, err := es.dataFile.Seek(0, os.SEEK_END)
 	if err != nil {
@@ -525,7 +522,7 @@ func (es *SzBinaryServer) loadIndex() error {
 	return nil
 }
 
-func NewBinaryServer(platformID uint16, port int, senderCompID, targetCompID string, partitionNos []uint32, onBusinessRequest func(msgtype uint32, body []byte)) *SzBinaryServer {
+func NewBinaryServer(platformID uint16, port int, senderCompID, targetCompID string, partitionNos []uint32, onBusinessRequest func(msgtype uint32, body []byte), loglevel zapcore.Level) *SzBinaryServer {
 	return &SzBinaryServer{
 		connected:    atomic.NewBool(false),
 		logon:        atomic.NewBool(false),
@@ -544,7 +541,7 @@ func NewBinaryServer(platformID uint16, port int, senderCompID, targetCompID str
 		sequenceFileName: fmt.Sprintf("./store/%s-%s.%s.seqnums", senderCompID, targetCompID, time.Now().Format("20060102")),
 		indexFileName: fmt.Sprintf("./store/%s-%s.%s.index", senderCompID, targetCompID, time.Now().Format("20060102")),
 		dataFileName: fmt.Sprintf("./store/%s-%s.%s.data", senderCompID, targetCompID, time.Now().Format("20060102")),
-		sequenceLock: sync.Mutex{},
-		msgLock: sync.Mutex{},
+		lock: &sync.Mutex{},
+		logLevel: loglevel,
 	}
 }
