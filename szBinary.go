@@ -1,10 +1,8 @@
 package szBinary
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/gob"
 	"fmt"
 	"github.com/panjf2000/gnet"
 	"github.com/panjf2000/gnet/logging"
@@ -12,7 +10,6 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap/zapcore"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"strconv"
@@ -68,6 +65,9 @@ type SzBinaryServer struct {
 	indexCache map[string]msgDef
 	indexFile *os.File
 	indexFileName string
+	// lock
+	sequenceLock sync.Mutex
+	msgLock sync.Mutex
 }
 
 func (es *SzBinaryServer) OnInitComplete(srv gnet.Server) (action gnet.Action) {
@@ -223,6 +223,9 @@ func (es *SzBinaryServer) React(frame []byte, c gnet.Conn) (out []byte, action g
 				return
 			}
 			NoPartitions := binary.BigEndian.Uint32(bodyBuff[:4])
+			var lock sync.Mutex
+			lock.Lock()
+			defer lock.Unlock()
 			for i:=uint32(0);i<NoPartitions;i++{
 				PartitionNo := binary.BigEndian.Uint32(bodyBuff[4 + 12*i:8 + 12*i])
 				ReportIndex := binary.BigEndian.Uint64(bodyBuff[8 + 12*i:16 + 12*i])
@@ -342,9 +345,6 @@ func (es *SzBinaryServer) sendToTarget(conn gnet.Conn, msgType uint32, body []by
 			es.logfile.Errorf("response send failed: %s", err.Error())
 			//发送失败也需要继续保存到本地文件，因此这里不能return
 		}
-		var lock sync.Mutex
-		lock.Lock()
-		defer lock.Unlock()
 		es.saveMessage(partitionNo, sequence, buf)
 	}
 	return nil
@@ -365,9 +365,8 @@ func (es *SzBinaryServer) incrSequence(platformID uint16, partitionNo uint32) ui
 		return seq.AddUint64(value, 1)
 	}
 	// key不存在，则返回1
-	var lock sync.Mutex
-	lock.Lock()
-	defer lock.Unlock()
+	es.sequenceLock.Lock()
+	defer es.sequenceLock.Unlock()
 	var initValue uint64 = 1
 	es.sequence[key] = &initValue
 	return initValue
@@ -418,9 +417,8 @@ func (es *SzBinaryServer) Run() (err error) {
 }
 
 func (es *SzBinaryServer) saveMessage(partitionNo uint32, reportIndex uint64, data []byte) (err error) {
-	var lock sync.Mutex
-	lock.Lock()
-	defer lock.Unlock()
+	es.msgLock.Lock()
+	defer es.msgLock.Unlock()
 	//保存data
 	offset, err := es.dataFile.Seek(0, os.SEEK_END)
 	if err != nil {
@@ -527,27 +525,6 @@ func (es *SzBinaryServer) loadIndex() error {
 	return nil
 }
 
-func (es *SzBinaryServer) getMessage() error {
-	raw, err := ioutil.ReadFile(es.indexFileName)
-	if err != nil{
-		if os.IsNotExist(err) {
-			es.logfile.Infof("索引信息文件信息不存在，索引信息重新开始计数")
-			return nil
-		}
-		es.logfile.Errorf("加载索引信息文件失败：%s", err.Error())
-		return err
-	}
-	if len(raw) > 0 {
-		buffer := bytes.NewBuffer(raw)
-		dec := gob.NewDecoder(buffer)
-		if err = dec.Decode(&es.indexCache); err != nil{
-			es.logfile.Errorf("解析索引信息文件失败：%s", err.Error())
-			return err
-		}
-	}
-	return nil
-}
-
 func NewBinaryServer(platformID uint16, port int, senderCompID, targetCompID string, partitionNos []uint32, onBusinessRequest func(msgtype uint32, body []byte)) *SzBinaryServer {
 	return &SzBinaryServer{
 		connected:    atomic.NewBool(false),
@@ -567,5 +544,7 @@ func NewBinaryServer(platformID uint16, port int, senderCompID, targetCompID str
 		sequenceFileName: fmt.Sprintf("./store/%s-%s.%s.seqnums", senderCompID, targetCompID, time.Now().Format("20060102")),
 		indexFileName: fmt.Sprintf("./store/%s-%s.%s.index", senderCompID, targetCompID, time.Now().Format("20060102")),
 		dataFileName: fmt.Sprintf("./store/%s-%s.%s.data", senderCompID, targetCompID, time.Now().Format("20060102")),
+		sequenceLock: sync.Mutex{},
+		msgLock: sync.Mutex{},
 	}
 }
