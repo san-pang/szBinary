@@ -10,11 +10,12 @@ go get github.com/san-pang/szBinary
 ```
 import (
   "github.com/san-pang/szBinary"
+  "go.uber.org/zap/zapcore"
   "log"
 )
 
 func main()  {
-  server, err := szBinary.NewBinaryServer(szBinary.PlatformID5, 9001, "sender", "target", []uint32{1,2,4}, onBusinessRequest)
+  server, err := szBinary.NewBinaryServer(szBinary.PlatformID5, 9001, "sender", "target", []uint32{1,2,4}, onBusinessRequest, zapcore.InfoLevel)
   if err != nil {
     log.Fatalln(err)
   }
